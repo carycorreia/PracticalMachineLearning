@@ -1,0 +1,114 @@
+---
+title: "Personal Activity Monitors"
+author: "Cary Correia"
+date: "December 16, 2014"
+output: html_document
+---
+
+###Executive Summary
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data 
+about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – 
+a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in 
+their behavior, or because they are tech geeks. 
+
+The goal of this project is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants and 
+to build a model that can predict the manner in which they performed barbell lifts correctly (A-E).
+More information is available from the website here: http://groupware.les.inf.puc-rio.br/har.
+ 
+The analytical flow was as follows:  1) download datasets; Training and Validation, (2) Clean and prep both datasets,
+(3) Figure out what data is not important with a screen model (4) Create a tuned model with a reduced variable set (5) Test the new model on the 'testing' dataset and (6) Use the final model to predict the values in the sample test data (20 rows)
+
+Final results showed a final model accuracy of 99.04% with an out of sample error equal to 0.96%.  These results were verified with cross-validation via a training (60% of sample) and testing (40%) set of data.  Final prediction on our sample of 20 test scenarios yielded 100% (see report)
+
+####Section 1) download datasets; Training and Testing
+
+```{r}
+#Prep....setup libraries and set.seed
+library(caret);library(randomForest); set.seed(12142014)    
+
+#Set the train and test url's
+data.url<-'http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'        
+test.url<-'http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+
+#Get and save the data
+data       <-read.csv(url(data.url), header=TRUE, sep=",", fill=TRUE, na.strings=c("NA", "", " "))               
+validation <- read.csv(url(test.url), header=TRUE, sep=",", na.strings="NA")
+```
+
+####Section 2) Clean and prep both datasets
+```{r}
+# Create a function to detect which column has lots of NA's - count #NA's / totalRows
+na.test <- function(x,y) {
+    w<-sapply(x, function(x)length(which(!is.na(x)))/length(x)*100)          # calculate %-age of rows that are NA in each col
+    z<<-as.data.frame(sapply(w, function(x)if(x>=y) keep<-x else keep<-NA))  # creates a vector keep that has columns we will keep
+    names(z)<<-c("value")                                                    # fixes the header of the z table
+}
+na.test(data, 99)                                                       # input-> dataset + threshold for non-NA's
+keep<-as.data.frame(row.names(na.omit(z))); names(keep)<-'label'
+keep<-as.character(keep$label[8:60])                                    # output-> vector of all rows to keep
+
+data<-data[,names(data) %in% keep]                                      # downselect the variables we want 
+nzero<-nearZeroVar(data, saveMetrics=TRUE)                              # check all remaining vars to see if they are near zero
+                                                                        # no non zero's were found- so nothing else to remove
+inTrain    <-createDataPartition(data$classe, p=.20, list = FALSE)      # create inTrain string for data partitions   
+training   <-data[inTrain,]                                             # this sample for 1st round eval of variables is low=3.9K
+```
+
+####Section 3) Figure out what data is not important
+```{r}
+library(doMC)                                                                   # this code enables parllel processing
+registerDoMC(cores = 4)                                                         # All subsequent models are then run in parallel
+
+screen<-randomForest(classe ~., data=training, importance=TRUE, proximity=TRUE) # 1st screen--> 3.9K obs with 53 variables....
+vi<-importance(screen)                                                          # Create varImportance matrix
+vi_vals<-as.data.frame(vi[,1:5])                                                # Save raw scores-> Higher is better
+top_vi<-as.data.frame(apply(vi_vals, 2, rank))                                  # Convert scores to rank
+top_vi$total<-rowSums(top_vi); top_sort<-top_vi[order(-top_vi$total),]          # Sum ranks-> Hi totals = more importance
+```
+
+The following chart illustrates the variables from most important to least.  We will now introduce a cutoff to shrink the number of variables in the next model. Note: the variable importance chart values were replaced with force rank scores.  By adding across the scores it was easy to assess which variables were the most valuable in our model:
+```{r, echo=FALSE}
+top_sort
+```
+
+####Section (4) Create a tuned model with a reduced variable set-> but only use the variables that pass section (3)
+```{r}
+# cut off the bottom of the variables....include these for the actual full model run
+keep2<-as.character(row.names(top_sort[top_sort$total>=88,]))                   # Take only variables >=88
+keep2[37]<-"classe"                                                             # Add back in the "classe" output
+
+data2<-data[,names(data) %in% keep2]                                            # Build the dataset with just the top values
+inTrain2    <-createDataPartition(data2$classe, p=.60, list = FALSE)            # create inTrain string for data partitions   (60:40 split)
+training2   <-data2[inTrain2,]                                                  # split data into training and testing 
+testing2    <-data2[-inTrain2,]
+
+model<-train(classe ~., data=training2, method='rf', importance=TRUE)           # final model: random forest--> 12K obs with 36 variables
+vi2<-varImp(model)
+```
+
+####Section 5) Test the new model on the 'testing' dataset
+```{r}
+accuracy<-confusionMatrix(testing2$classe, predict(model, testing2))            # apply model to testing data
+accuracy                                                                        # print out accuracy (99.06%)
+```
+The accuracy of the model is `r acc<-round(accuracy$overall[1]*100, 2);acc` and the out of sample error is `r 100-acc`
+
+#####Section 6) Use the finalModel to predict the values in the sample test data (20 rows)
+```{r}
+# prep validation data
+keep2[37]<- "problem_id"                                                        # fix keep2 vector and replace classe with prob ID
+test_final<-validation[,names(validation) %in% keep2]                           # prep the test data to downselect the model variables
+f.predict<-as.character(predict(model, test_final))                             # create a final prediction vector w. 20 answers
+```
+The final predicted string for the 20 test samples was `r f.predict`.  
+This list was submitted and all 20 were correct.
+
+
+####Appendix
+
+Full Variable Importance Matrix for all outcomes 1-5:
+```{r}
+plot(vi2, asp=4)
+```
+
